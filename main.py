@@ -4,20 +4,8 @@ import pandas as pd
 import datetime
 import math
 
-# --- PART 1: STRATEGY IMPLEMENTATION [cite: 2] ---
-
 class HybridTrendMeanReversion(bt.Strategy):
-    """
-    Strategy: Hybrid Trend Following + Mean Reversion
     
-    Logic:
-    1. Trend Filter: Price must be above SMA 200 (Long-term trend).
-    2. Entry Signal: SMA 10 crosses over SMA 30 AND RSI is not overbought (< 70).
-    3. Exit Signal: SMA 10 crosses under SMA 30 OR Trailing Stop hit.
-    4. Risk Management: ATR-based position sizing and stops.
-    """
-    
-    # Parameters for optimization [cite: 12]
     params = (
         ('fast_ma', 10),
         ('slow_ma', 30),
@@ -30,34 +18,30 @@ class HybridTrendMeanReversion(bt.Strategy):
     )
 
     def __init__(self):
-        # Indicators [cite: 4, 40]
+        
         self.fast_ma = bt.indicators.SMA(self.data.close, period=self.params.fast_ma)
         self.slow_ma = bt.indicators.SMA(self.data.close, period=self.params.slow_ma)
         self.trend_ma = bt.indicators.SMA(self.data.close, period=self.params.trend_ma)
         self.rsi = bt.indicators.RSI(self.data.close, period=self.params.rsi_period)
         self.atr = bt.indicators.ATR(self.data, period=self.params.atr_period)
         
-        # CrossOver Signal
+       
         self.crossover = bt.indicators.CrossOver(self.fast_ma, self.slow_ma)
 
     def next(self):
-        # Skip if orders are pending
+       
         if self.position:
-            # Check for Exit Signal 
-            if self.crossover < 0: # Fast MA crosses under Slow MA
+             
+            if self.crossover < 0: 
                 self.close() 
             return
 
-        # Entry Logic 
-        # 1. Trend Filter (Price > 200 SMA)
-        # 2. Bullish Crossover (10 > 30)
-        # 3. RSI is healthy (not > 70)
+       
         if (self.data.close[0] > self.trend_ma[0] and 
             self.crossover > 0 and 
             self.rsi[0] < self.params.rsi_upper):
             
-            # Position Sizing (Dynamic Risk Management) 
-            # Calculate size based on risking % of equity
+           
             risk_amt = self.broker.get_cash() * self.params.risk_per_trade
             stop_dist = self.atr[0] * self.params.stop_loss_atr
             
@@ -65,10 +49,10 @@ class HybridTrendMeanReversion(bt.Strategy):
             
             size = risk_amt / stop_dist
             
-            # Send Buy Order with Bracket (Stop Loss + Take Profit) 
+            
             self.buy(size=size)
             
-            # Set Stop Loss (ATR Based)
+            
             self.sell(exectype=bt.Order.Stop, price=self.data.close[0] - stop_dist, size=size)
 
     def notify_trade(self, trade):
