@@ -2,128 +2,138 @@ import backtrader as bt
 import yfinance as yf
 import pandas as pd
 import datetime
-import math
 
 class HybridTrendMeanReversion(bt.Strategy):
-    
-    params = (
-        ('fast_ma', 10),
-        ('slow_ma', 30),
-        ('trend_ma', 200),
-        ('rsi_period', 14),
-        ('rsi_upper', 70),
-        ('atr_period', 14),
-        ('risk_per_trade', 0.02),  # Risk 2% of account per trade 
-        ('stop_loss_atr', 2.0),    # Stop loss at 2x ATR
+
+    params = dict(
+        fast_ma=20,
+        slow_ma=50,
+        trend_ma=100,
+        rsi_period=14,
+        atr_period=14,
+        risk_per_trade=0.01,
+        stop_atr=1.5,
+        target_atr=3.0,
+        max_bars_in_trade=48
     )
 
     def __init__(self):
-        
-        self.fast_ma = bt.indicators.SMA(self.data.close, period=self.params.fast_ma)
-        self.slow_ma = bt.indicators.SMA(self.data.close, period=self.params.slow_ma)
-        self.trend_ma = bt.indicators.SMA(self.data.close, period=self.params.trend_ma)
-        self.rsi = bt.indicators.RSI(self.data.close, period=self.params.rsi_period)
-        self.atr = bt.indicators.ATR(self.data, period=self.params.atr_period)
-        
-       
-        self.crossover = bt.indicators.CrossOver(self.fast_ma, self.slow_ma)
+        self.fast = bt.indicators.EMA(self.data.close, period=self.p.fast_ma)
+        self.slow = bt.indicators.EMA(self.data.close, period=self.p.slow_ma)
+        self.trend = bt.indicators.EMA(self.data.close, period=self.p.trend_ma)
+        self.rsi = bt.indicators.RSI(self.data.close, period=self.p.rsi_period)
+        self.atr = bt.indicators.ATR(self.data, period=self.p.atr_period)
+        self.bar_entry = None
 
     def next(self):
-       
+
+        if self.position and self.bar_entry is not None:
+            if len(self) - self.bar_entry >= self.p.max_bars_in_trade:
+                self.close()
+                return
+
         if self.position:
-             
-            if self.crossover < 0: 
-                self.close() 
             return
 
-       
-        if (self.data.close[0] > self.trend_ma[0] and 
-            self.crossover > 0 and 
-            self.rsi[0] < self.params.rsi_upper):
-            
-           
-            risk_amt = self.broker.get_cash() * self.params.risk_per_trade
-            stop_dist = self.atr[0] * self.params.stop_loss_atr
-            
-            if stop_dist == 0: return # Avoid division by zero
-            
-            size = risk_amt / stop_dist
-            
-            
+        if (
+            self.data.close[0] > self.trend[0] and
+            self.fast[0] > self.slow[0] and
+            40 < self.rsi[0] < 55
+        ):
+            portfolio_value = self.broker.getvalue()
+            risk_cash = portfolio_value * self.p.risk_per_trade
+
+            stop_dist = self.atr[0] * self.p.stop_atr
+            if stop_dist <= 0:
+                return
+
+            size = risk_cash / stop_dist
+            max_size = (portfolio_value * 0.2) / self.data.close[0]
+            size = min(size, max_size)
+
+            entry_price = self.data.close[0]
+            stop_price = entry_price - stop_dist
+            target_price = entry_price + self.atr[0] * self.p.target_atr
+
             self.buy(size=size)
-            
-            
-            self.sell(exectype=bt.Order.Stop, price=self.data.close[0] - stop_dist, size=size)
+            self.sell(exectype=bt.Order.Stop, price=stop_price, size=size)
+            self.sell(exectype=bt.Order.Limit, price=target_price, size=size)
+
+            self.bar_entry = len(self)
 
     def notify_trade(self, trade):
-        if not trade.isclosed:
-            return
-        # Logging trade results [cite: 27]
-        print(f'Trade PnL: Gross {trade.pnl:.2f}, Net {trade.pnlcomm:.2f}')
+        if trade.isclosed:
+            print(
+                f"Trade Closed | PnL Gross: {trade.pnl:.2f}, "
+                f"PnL Net: {trade.pnlcomm:.2f}"
+            )
 
-# --- PART 2: PERFORMANCE ANALYSIS SETUP [cite: 13] ---
 
 def run_backtest():
-    cerebro = bt.Cerebro()
 
-    # 1. Data Loading (Using yfinance for <1 hour timeframe) 
-    # We download hourly data for SPY (S&P 500 ETF) for the last 730 days (~2 years)
-    print("Downloading Data...")
-    data_df = yf.download("SPY", period="730d", interval="1h", progress=False)
-    
-    # Clean data (Multi-index handling for new yfinance versions)
-    if isinstance(data_df.columns, pd.MultiIndex):
-        data_df.columns = data_df.columns.droplevel(1)
-    data_df.dropna(inplace=True)
+    cerebro = bt.Cerebro(stdstats=False)
 
-    # Feed data to Cerebro
-    data = bt.feeds.PandasData(dataname=data_df)
+    df = yf.download(
+        "SPY",
+        period="730d",
+        interval="1h",
+        progress=False
+    )
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+
+    df.dropna(inplace=True)
+
+    data = bt.feeds.PandasData(dataname=df)
     cerebro.adddata(data)
 
-    # 2. Add Strategy
     cerebro.addstrategy(HybridTrendMeanReversion)
 
-    # 3. Broker Setup
-    cerebro.broker.setcash(100000.0) # $100k Capital
-    cerebro.broker.setcommission(commission=0.001) # 0.1% commission
+    cerebro.broker.setcash(100000)
+    cerebro.broker.setcommission(commission=0.001)
 
-    # 4. Add Analyzers for Part 2 Requirements [cite: 15]
-    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', timeframe=bt.TimeFrame.Minutes, compression=60)
+    cerebro.addanalyzer(
+        bt.analyzers.SharpeRatio,
+        _name='sharpe',
+        timeframe=bt.TimeFrame.Minutes,
+        compression=60
+    )
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
 
-    # Run
-    print(f'Starting Portfolio Value: {cerebro.broker.getvalue():.2f}')
+    print(f"Starting Portfolio: {cerebro.broker.getvalue():.2f}")
     results = cerebro.run()
     strat = results[0]
-    
-    # --- OUTPUT METRICS [cite: 14, 15] ---
-    print("\n--- PERFORMANCE METRICS ---")
-    print(f"Final Portfolio Value: {cerebro.broker.getvalue():.2f}")
-    
-    # Sharpe
+    final_value = cerebro.broker.getvalue()
+
+    print("\n===== PERFORMANCE =====")
+    print(f"Final Portfolio Value: {final_value:.2f}")
+
     sharpe = strat.analyzers.sharpe.get_analysis()
-    print(f"Sharpe Ratio: {sharpe.get('sharperatio', 0):.4f}")
-    
-    # Drawdown
+    print(f"Sharpe Ratio: {sharpe.get('sharperatio', 0):.2f}")
+
     dd = strat.analyzers.drawdown.get_analysis()
     print(f"Max Drawdown: {dd['max']['drawdown']:.2f}%")
-    print(f"Max Drawdown Duration: {dd['max']['len']} periods")
-    
-    # Trade Stats [cite: 17]
-    trades = strat.analyzers.trades.get_analysis()
-    total_trades = trades.get('total', {}).get('total', 0)
-    if total_trades > 0:
-        win_rate = trades['won']['total'] / total_trades
-        print(f"Total Trades: {total_trades}")
-        print(f"Win Rate: {win_rate:.2%}")
-        print(f"Profit Factor: {abs(trades['won']['pnl']['total'] / trades['lost']['pnl']['total'] if trades['lost']['pnl']['total'] != 0 else 0):.2f}")
-    else:
-        print("No trades generated.")
 
-    # --- VISUALIZATION [cite: 16] ---
-    print("\nPlotting results...")
+    trades = strat.analyzers.trades.get_analysis()
+    total = trades.get('total', {}).get('total', 0)
+
+    if total > 0:
+        win_rate = trades['won']['total'] / total
+        profit_factor = abs(
+            trades['won']['pnl']['total'] /
+            trades['lost']['pnl']['total']
+        ) if trades['lost']['pnl']['total'] != 0 else 0
+
+        print(f"Total Trades: {total}")
+        print(f"Win Rate: {win_rate:.2%}")
+        print(f"Profit Factor: {profit_factor:.2f}")
+    else:
+        print("No trades executed.")
+
     cerebro.plot(style='candlestick', volume=False)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     run_backtest()
